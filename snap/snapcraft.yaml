@@ -18,7 +18,7 @@ parts:
   tflint:
     plugin: go
     build-environment:
-      - GOBIN: /root/prime
+      - GOBIN: "$CRAFT_PRIME"
     build-snaps: [go]
     source-type: git
     override-build: make install
