@@ -1,0 +1,25 @@
+name: tingdahl-tflint
+summary: Linter for terraform definitions
+description: |
+      A snap containint the tflint from https://github.com/terraform-linters/tflint
+version: git
+source-code: https://github.com/tingdahl/tflint.git
+grade: devel
+base: core22
+
+confinement: devmode
+
+apps:
+  tflint:
+    command: tflint
+    plugs:
+      - home
+parts:
+  tflint:
+    plugin: go
+    build-environment:
+      - GOBIN: /root/prime
+    build-snaps: [go]
+    source-type: git
+    override-build: make install
+    source: https://github.com/tingdahl/tflint.git

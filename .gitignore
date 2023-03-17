@@ -3,3 +3,6 @@
 /dist
 tflint-ruleset-*
 !tflint-ruleset-*/
+
+# Snap output
+*.snap
