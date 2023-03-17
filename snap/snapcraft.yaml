@@ -7,7 +7,7 @@ source-code: https://github.com/tingdahl/tflint.git
 grade: devel
 base: core22
 
-confinement: devmode
+confinement: strict
 
 apps:
   tflint:
