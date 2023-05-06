@@ -1,0 +1,7 @@
+#!/bin/bash
+
+git remote add upstream https://github.com/terraform-linters/tflint.git
+git fetch upstream
+git merge upstream/master -m "Merging upstream master"
+git push 
+
