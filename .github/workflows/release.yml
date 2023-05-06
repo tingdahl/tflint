@@ -20,11 +20,11 @@ jobs:
       with:
         submodules: true
     - name: Set up Go
-      uses: actions/setup-go@v3
+      uses: actions/setup-go@v4
       with:
         go-version-file: 'go.mod'
     - name: Install Cosign
-      uses: sigstore/cosign-installer@v3.0.1
+      uses: sigstore/cosign-installer@v3.0.3
     - name: Run GoReleaser
       uses: goreleaser/goreleaser-action@v4
       with:
