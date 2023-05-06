@@ -1,10 +1,15 @@
 name: tingdahl-tflint
+title: tflint
+contact: https://github.com/tingdahl/tflint
+website: https://github.com/tingdahl/tflint
+license: MPL-2.0
 summary: Linter for terraform definitions
 description: |
-      A snap containint the tflint from https://github.com/terraform-linters/tflint
+      The tflint from https://github.com/terraform-linters/tflint . |
+      The the snap should follow the upstream project.
 version: git
 source-code: https://github.com/tingdahl/tflint.git
-grade: devel
+grade: stable
 base: core22
 
 confinement: strict
