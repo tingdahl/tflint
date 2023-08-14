@@ -1,7 +1,11 @@
 #!/bin/bash
 
-git remote add upstream https://github.com/terraform-linters/tflint.git
-git fetch upstream
-git merge upstream/master -m "Merging upstream master"
-git push 
+#git remote add upstream https://github.com/terraform-linters/tflint.git
+#git fetch upstream
+#git checkout master
+#git pull
+#git merge <tag> -m "Merging upstream tag <tag>"
+#git tag -d <tag>
+#git tag -a <tag>
+#git push origin <tag>
 
