@@ -6,6 +6,7 @@
 #git pull
 #git merge <tag> -m "Merging upstream tag <tag>"
 #git tag -d <tag>
-#git tag -a <tag>
+#git tag -a <tag> -m "Added tag <tag>"
+#git push origin
 #git push origin <tag>
 
