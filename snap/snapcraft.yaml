@@ -32,6 +32,6 @@ parts:
       # build the latest tagged release
       latest_tag=$(git tag --list | grep '^v' | sort -V | tail -1)
       git checkout ${latest_tag?}
-      snapcraftctl set-version $(git describe --tags)
+      craftctl set version=$(git describe --tags)
       make install
     source: https://github.com/tingdahl/tflint.git
