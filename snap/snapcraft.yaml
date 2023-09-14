@@ -7,7 +7,7 @@ summary: Linter for terraform definitions
 description: >
       The tflint from https://github.com/terraform-linters/tflint . 
       The the snap should follow the upstream project.
-version: git
+adopt-info: tflint
 source-code: https://github.com/tingdahl/tflint.git
 grade: stable
 base: core22
@@ -28,5 +28,10 @@ parts:
       - GOBIN: "$CRAFT_PRIME"
     build-snaps: [go]
     source-type: git
-    override-build: make install
+    override-build: |
+      # build the latest tagged release
+      latest_tag=$(git tag --list | grep '^v' | sort -V | tail -1)
+      git checkout ${latest_tag?}
+      craftctl set version=$(git describe --tags)
+      make install
     source: https://github.com/tingdahl/tflint.git
