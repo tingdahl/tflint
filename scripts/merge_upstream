@@ -13,14 +13,14 @@ TAG=$1
 if ! command -v git &> /dev/null
 then
     echo "git could not be found"
-    exit
+    exit 1
 fi
 
 #Check that grep exists
 if ! command -v grep &> /dev/null
 then
     echo "grep could not be found"
-    exit
+    exit 1
 fi
 
 
