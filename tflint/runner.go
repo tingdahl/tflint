@@ -84,10 +84,10 @@ func NewModuleRunners(parent *Runner) ([]*Runner, error) {
 	for name, cfg := range parent.TFConfig.Children {
 		moduleCall, ok := parent.TFConfig.Module.ModuleCalls[name]
 		if !ok {
-			panic(fmt.Errorf("Expected module call `%s` is not found in `%s`", name, parent.TFConfig.Path.String()))
+			panic(fmt.Errorf(`Expected module call "%s" is not found in %s`, name, parent.TFConfig.Path.String()))
 		}
 		if parent.TFConfig.Path.IsRoot() && parent.config.IgnoreModules[moduleCall.SourceAddrRaw] {
-			log.Printf("[INFO] Ignore `%s` module", moduleCall.Name)
+			log.Printf(`[INFO] Ignore "%s" module`, moduleCall.Name)
 			continue
 		}
 
@@ -240,14 +240,14 @@ func (r *Runner) EmitIssue(rule Rule, message string, location hcl.Range, fixabl
 		})
 	} else {
 		modVars := r.listModuleVars(r.currentExpr)
-		// Returns true only if all issues have not been ignored in module inspection.
+		// Returns true only if all issues have not been ignored in called modules.
 		allApplied := len(modVars) > 0
 		for _, modVar := range modVars {
 			applied := r.emitIssue(&Issue{
 				Rule:    rule,
 				Message: message,
 				Range:   modVar.DeclRange,
-				Fixable: false, // Issues for module inspection are always not fixable.
+				Fixable: false, // Issues are always not fixable in called modules.
 				Callers: append(modVar.callers(), location),
 				Source:  r.Sources()[modVar.DeclRange.Filename],
 			})

@@ -112,7 +112,7 @@ func (s *GRPCServer) GetRuleConfigContent(name string, bodyS *hclext.BodySchema)
 	body, diags := hclext.Content(configBody, bodyS)
 	if diags.HasErrors() {
 		if enabledByCLI {
-			return nil, s.runner.ConfigSources(), errors.New("This rule cannot be enabled with the `--enable-rule` option because it lacks the required configuration")
+			return nil, s.runner.ConfigSources(), errors.New("This rule cannot be enabled with the --enable-rule option because it lacks the required configuration")
 		}
 		return body, s.runner.ConfigSources(), diags
 	}
@@ -189,7 +189,7 @@ func (s *GRPCServer) EvaluateExpr(expr hcl.Expression, opts sdk.EvaluateExprOpti
 // EmitIssue stores an issue in the server based on passed rule, message, and location.
 func (s *GRPCServer) EmitIssue(rule sdk.Rule, message string, location hcl.Range, fixable bool) (bool, error) {
 	// If the issue range represents an expression, it is emitted based on that context.
-	// This is important for module inspection that emits issues for module arguments included in the expression.
+	// This is required to emit issues in called modules.
 	expr, err := s.getExprFromRange(location)
 	if err != nil {
 		// If the range does not represent an expression, just emit it without context.
