@@ -206,9 +206,9 @@ func TestIntegration(t *testing.T) {
 			Dir:     "chdir",
 		},
 		{
-			Name:    "recursive",
-			Command: "tflint --recursive --format json",
-			Dir:     "recursive",
+			Name:    "functions",
+			Command: "tflint --format json",
+			Dir:     "functions",
 		},
 	}
 
