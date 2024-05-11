@@ -1,12 +1,13 @@
 run:
   timeout: 5m
-  skip-dirs:
-    - terraform/
 linters:
   enable:
     - gci
     - gofmt
+    - copyloopvar
 issues:
+  exclude-dirs:
+    - terraform/
   exclude-rules:
     - path: terraform/
       linters:
