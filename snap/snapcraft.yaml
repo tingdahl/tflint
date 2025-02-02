@@ -10,7 +10,7 @@ description: >
 adopt-info: tflint
 source-code: https://github.com/tingdahl/tflint.git
 grade: stable
-base: core22
+base: core24
 
 confinement: strict
 
