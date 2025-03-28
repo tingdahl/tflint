@@ -1,5 +1,5 @@
 # TFLint
-[![Build Status](https://github.com/terraform-linters/tflint/workflows/build/badge.svg?branch=master)](https://github.com/terraform-linters/tflint/actions)
+[![Build Status](https://github.com/terraform-linters/tflint/actions/workflows/build.yml/badge.svg?branch=master)](https://github.com/terraform-linters/tflint/actions)
 [![GitHub release](https://img.shields.io/github/release/terraform-linters/tflint.svg)](https://github.com/terraform-linters/tflint/releases/latest)
 [![Terraform Compatibility](https://img.shields.io/badge/terraform-%3E%3D%201.0-blue)](docs/user-guide/compatibility.md)
 [![License: MPL 2.0 + BUSL 1.1](https://img.shields.io/badge/License-MPL%202.0%20+%20BUSL%201.1-blue.svg)](#license)
@@ -64,6 +64,12 @@ Instead of installing directly, you can use the Docker image:
 
 ```console
 docker run --rm -v $(pwd):/data -t ghcr.io/terraform-linters/tflint
+```
+
+To download plugins, you can override the entrypoint to a shell (`sh`) to run `--init` and the main command in a single `docker run` command:
+
+```console
+ docker run --rm -v $(pwd):/data -t --entrypoint /bin/sh ghcr.io/terraform-linters/tflint -c "tflint --init && tflint"
 ```
 
 ### GitHub Actions
