@@ -26,7 +26,8 @@ parts:
     plugin: go
     build-environment:
       - GOBIN: "$CRAFT_PRIME"
-    build-snaps: [go]
+    build-snaps:
+      - go/1.24/stable
     source-type: git
     override-build: |
       # build the latest tagged release
