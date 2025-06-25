@@ -1,4 +1,5 @@
 name: tflint
+version: v0.58.0
 title: tflint
 contact: https://github.com/tingdahl/tflint
 website: https://github.com/tingdahl/tflint
@@ -29,8 +30,5 @@ parts:
     source-type: git
     override-build: |
       # build the latest tagged release
-      latest_tag=$(git tag --list | grep '^v' | sort -V | tail -1)
-      git checkout ${latest_tag?}
-      craftctl set version=$(git describe --tags)
       make install
     source: https://github.com/tingdahl/tflint.git
