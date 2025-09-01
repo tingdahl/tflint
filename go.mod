@@ -1,6 +1,8 @@
 module github.com/terraform-linters/tflint
 
-go 1.24.2
+go 1.24.5
+
+toolchain go1.24.6
 
 require (
 	github.com/agext/levenshtein v1.2.3
