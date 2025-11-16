@@ -36,6 +36,13 @@ func TestIntegration(t *testing.T) {
 			stdout:  fmt.Sprintf("TFLint version %s", tflint.Version),
 		},
 		{
+			name:    "print version with plugins in alphabetical order",
+			command: "./tflint --version",
+			dir:     "version_ordering",
+			status:  cmd.ExitCodeOK,
+			stdout:  "ruleset.bar (0.1.0)\n+ ruleset.foo (0.1.0)",
+		},
+		{
 			name:    "print help",
 			command: "./tflint --help",
 			dir:     "no_issues",
@@ -70,6 +77,21 @@ func TestIntegration(t *testing.T) {
 			dir:     "format_config",
 			status:  cmd.ExitCodeOK,
 			stdout:  "[]",
+		},
+		{
+			name:    "JSON format config",
+			command: "./tflint",
+			dir:     "json_config",
+			status:  cmd.ExitCodeOK,
+			stdout: `<?xml version="1.0" encoding="UTF-8"?>
+<checkstyle></checkstyle>`,
+		},
+		{
+			name:    "HCL precedence over JSON config",
+			command: "./tflint",
+			dir:     "hcl_json_precedence",
+			status:  cmd.ExitCodeOK,
+			stdout:  "",
 		},
 		{
 			name:    "`--force` option with no issues",
