@@ -8,8 +8,12 @@ Below is a list of environment variables available in TFLint.
   - Configure the config file path. See [Configuring TFLint](./config.md).
 - `TFLINT_PLUGIN_DIR`
   - Configure the plugin directory. See [Configuring Plugins](./plugins.md).
+- `TFLINT_DISABLE_VERSION_CHECK`
+  - Disable version update notifications when running `tflint --version`. Set to `1` to disable.
+- `GITHUB_TOKEN`
+  - (Optional) Used for authenticated GitHub API requests when checking for updates and downloading plugins. Increases the rate limit from 60 to 5000 requests per hour. Useful if you encounter rate limit errors. You can obtain a token by creating a [GitHub personal access token](https://github.com/settings/tokens); no special scopes are required.
 - `TFLINT_EXPERIMENTAL`
-  - Enable experimental features. Note that experimental features are subject to change without notice. Currently only [Keyless Verification](./plugins.md#keyless-verification-experimental) are supported.
+  - Enable experimental features. Note that experimental features are subject to change without notice. Currently there is no impact.
 - `TF_VAR_name`
   - Set variables for compatibility with Terraform. See [Compatibility with Terraform](./compatibility.md).
 - `TF_DATA_DIR`
