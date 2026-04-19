@@ -2,9 +2,11 @@ package plugin
 
 import (
 	"errors"
+	"net/http"
 	"os"
 	"testing"
 
+	"github.com/google/go-github/v81/github"
 	"github.com/terraform-linters/tflint/tflint"
 )
 
@@ -162,6 +164,70 @@ func Test_Install_withoutAttestationsAndPGPSignature(t *testing.T) {
 	expected := "tflint-ruleset-aws" + fileExt()
 	if info.Name() != expected {
 		t.Fatalf("Installed binary name is invalid: expected=%s, got=%s", expected, info.Name())
+	}
+}
+
+func TestInstallConfigSignatureMode(t *testing.T) {
+	private := true
+	public := false
+
+	tests := []struct {
+		name         string
+		config       *InstallConfig
+		repo         *github.Repository
+		attestations []*github.Attestation
+		want         SignatureMode
+	}{
+		{
+			name:   "auto prefers attestations",
+			config: NewInstallConfig(tflint.EmptyConfig(), &tflint.PluginConfig{}),
+			repo:   &github.Repository{Private: &public},
+			attestations: []*github.Attestation{
+				{},
+			},
+			want: SignatureModeAttestation,
+		},
+		{
+			name:   "auto falls back to signing key",
+			config: NewInstallConfig(tflint.EmptyConfig(), &tflint.PluginConfig{SigningKey: testSigningKey}),
+			repo:   &github.Repository{Private: &public},
+			want:   SignatureModePGP,
+		},
+		{
+			name:   "auto skips private repo attestations",
+			config: NewInstallConfig(tflint.EmptyConfig(), &tflint.PluginConfig{}),
+			repo:   &github.Repository{Private: &private},
+			attestations: []*github.Attestation{
+				{},
+			},
+			want: SignatureModeNone,
+		},
+		{
+			name:   "forced attestation",
+			config: NewInstallConfig(tflint.EmptyConfig(), &tflint.PluginConfig{Signature: "attestation", SigningKey: testSigningKey}),
+			want:   SignatureModeAttestation,
+		},
+		{
+			name:   "forced pgp",
+			config: NewInstallConfig(tflint.EmptyConfig(), &tflint.PluginConfig{Signature: "pgp"}),
+			want:   SignatureModePGP,
+		},
+		{
+			name:   "forced none",
+			config: NewInstallConfig(tflint.EmptyConfig(), &tflint.PluginConfig{Signature: "none", SigningKey: testSigningKey}),
+			want:   SignatureModeNone,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			sigchecker := NewSignatureChecker(test.config)
+
+			got := test.config.signatureMode(test.repo, test.attestations, sigchecker)
+			if got != test.want {
+				t.Fatalf("unexpected signature mode: want %s, got %s", test.want, got)
+			}
+		})
 	}
 }
 
@@ -332,6 +398,54 @@ func TestGetGitHubToken(t *testing.T) {
 			got := test.config.getGitHubToken()
 			if got != test.want {
 				t.Errorf("got %q, want %q", got, test.want)
+			}
+		})
+	}
+}
+
+func TestIsIgnorableAttestationError(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{
+			name: "403 forbidden",
+			err: &github.ErrorResponse{
+				Response: &http.Response{StatusCode: http.StatusForbidden},
+			},
+			want: true,
+		},
+		{
+			name: "404 not found",
+			err: &github.ErrorResponse{
+				Response: &http.Response{StatusCode: http.StatusNotFound},
+			},
+			want: true,
+		},
+		{
+			name: "401 unauthorized",
+			err: &github.ErrorResponse{
+				Response: &http.Response{StatusCode: http.StatusUnauthorized},
+			},
+			want: false,
+		},
+		{
+			name: "non github error",
+			err:  errors.New("boom"),
+			want: false,
+		},
+		{
+			name: "github error without response",
+			err:  &github.ErrorResponse{},
+			want: false,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := isIgnorableAttestationError(test.err); got != test.want {
+				t.Fatalf("isIgnorableAttestationError() = %v, want %v", got, test.want)
 			}
 		})
 	}

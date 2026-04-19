@@ -25,6 +25,15 @@ import (
 
 const defaultSourceHost = "github.com"
 
+type SignatureMode string
+
+const (
+	SignatureModeAuto        SignatureMode = "auto"
+	SignatureModeAttestation SignatureMode = "attestation"
+	SignatureModePGP         SignatureMode = "pgp"
+	SignatureModeNone        SignatureMode = "none"
+)
+
 // InstallConfig is a config for plugin installation.
 // This is a wrapper for PluginConfig and manages naming conventions
 // and directory names for installation.
@@ -120,21 +129,18 @@ func (c *InstallConfig) Install() (string, error) {
 		return "", err
 	}
 
-	var verified bool
 	var legacyKeyUsed bool
 	sigchecker := NewSignatureChecker(c)
-	switch {
-	// Prefer to use artifact attestations if available
-	case c.shouldVerifyAttestations(repo, attestations):
+	sigMode := c.signatureMode(repo, attestations, sigchecker)
+	switch sigMode {
+	case SignatureModeAttestation:
 		log.Printf("[DEBUG] Verifying using artifact attestations")
 		if err := sigchecker.VerifyAttestations(bytes.NewReader(checksum), attestations); err != nil {
 			return "", fmt.Errorf("Failed to check checksums.txt signature: %s", err)
 		}
 		log.Printf("[DEBUG] Verified signature successfully")
-		verified = true
 
-	// Fallback to PGP signing key verification
-	case sigchecker.HasSigningKey():
+	case SignatureModePGP:
 		log.Printf("[DEBUG] Download checksums.txt.sig")
 		signatureFile, err := c.downloadToTempFile(ctx, client, assets["checksums.txt.sig"])
 		if signatureFile != nil {
@@ -149,15 +155,17 @@ func (c *InstallConfig) Install() (string, error) {
 			return "", fmt.Errorf("Failed to check checksums.txt signature: %s", err)
 		}
 		log.Printf("[DEBUG] Verified signature successfully")
-		verified = true
 
 		// If using built-in signing key, a warning will be shown.
 		if sigchecker.GetSigningKey() == builtinSigningKey {
 			legacyKeyUsed = true
 		}
 
+	case SignatureModeNone:
+		log.Printf("[DEBUG] Skipping signature verification")
+
 	default:
-		log.Printf("[DEBUG] No signing key or attestations found, skipping signature verification")
+		panic(fmt.Sprintf("never happened. signature=%s", sigMode))
 	}
 
 	log.Printf("[DEBUG] Download %s", c.AssetName())
@@ -183,13 +191,35 @@ func (c *InstallConfig) Install() (string, error) {
 	}
 
 	log.Printf("[DEBUG] Installed %s successfully", path)
-	if !verified {
+	if sigMode == SignatureModeNone {
 		return path, ErrPluginNotVerified
 	}
 	if legacyKeyUsed {
 		return path, ErrLegacySigningKeyUsed
 	}
 	return path, nil
+}
+
+func (c *InstallConfig) signatureMode(repo *github.Repository, attestations []*github.Attestation, sigchecker *SignatureChecker) SignatureMode {
+	switch SignatureMode(c.Signature) {
+	case SignatureModeAttestation, SignatureModePGP, SignatureModeNone:
+		return SignatureMode(c.Signature)
+
+	case "", SignatureModeAuto:
+		// Prefer to use artifact attestations if available
+		if c.shouldVerifyAttestations(repo, attestations) {
+			return SignatureModeAttestation
+		}
+		// Fallback to PGP signing key verification
+		if sigchecker.HasSigningKey() {
+			return SignatureModePGP
+		}
+		log.Printf("[DEBUG] No signing key or attestations found, skipping signature verification")
+		return SignatureModeNone
+
+	default:
+		panic(fmt.Sprintf("never happened. signature=%s", c.Signature))
+	}
 }
 
 func (c *InstallConfig) shouldVerifyAttestations(repo *github.Repository, attestations []*github.Attestation) bool {
@@ -222,10 +252,10 @@ func (c *InstallConfig) fetchFromGitHub(ctx context.Context, client *github.Clie
 
 	attestations, err := c.fetchArtifactAttestations(ctx, client, checksum)
 	if err != nil {
-		var gerr *github.ErrorResponse
-		// If there are no attestations, it will be ignored without errors.
-		if errors.As(err, &gerr) && gerr.Response.StatusCode == 404 {
-			log.Printf("[DEBUG] Artifact attestations not found and will be ignored: %s", err)
+		// If attestations are not available or not accessible, ignore them and
+		// continue with the remaining verification flow.
+		if isIgnorableAttestationError(err) {
+			log.Printf("[DEBUG] Artifact attestations unavailable and will be ignored: %s", err)
 			return assets, checksum, nil, nil, nil
 		} else {
 			return assets, checksum, nil, nil, fmt.Errorf("Failed to download artifact attestations: %s", err)
@@ -276,6 +306,20 @@ func (c *InstallConfig) fetchArtifactAttestations(ctx context.Context, client *g
 		return []*github.Attestation{}, err
 	}
 	return resp.Attestations, nil
+}
+
+func isIgnorableAttestationError(err error) bool {
+	var gerr *github.ErrorResponse
+	if !errors.As(err, &gerr) || gerr.Response == nil {
+		return false
+	}
+
+	switch gerr.Response.StatusCode {
+	case http.StatusForbidden, http.StatusNotFound:
+		return true
+	default:
+		return false
+	}
 }
 
 // downloadToTempFile download assets from GitHub to a local temp file.
