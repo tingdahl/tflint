@@ -13,6 +13,13 @@ source-code: https://github.com/tingdahl/tflint.git
 grade: stable
 base: core24
 
+platforms:
+  amd64:
+  arm64:
+  armhf:
+  ppc64el:
+  s390x:
+
 confinement: strict
 
 apps:
