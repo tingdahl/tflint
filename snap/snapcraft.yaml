@@ -1,5 +1,5 @@
 name: tflint
-version: v0.62.0
+version: v0.62.1
 title: tflint
 contact: https://github.com/tingdahl/tflint
 website: https://github.com/tingdahl/tflint
@@ -12,13 +12,6 @@ adopt-info: tflint
 source-code: https://github.com/tingdahl/tflint.git
 grade: stable
 base: core24
-
-platforms:
-  amd64:
-  arm64:
-  armhf:
-  ppc64el:
-  s390x:
 
 confinement: strict
 
@@ -35,7 +28,7 @@ parts:
     build-environment:
       - GOBIN: "$CRAFT_PRIME"
     build-snaps:
-      - go/1.26/stable
+      - go/1.25/stable
     source-type: git
     override-build: |
       # build the latest tagged release
