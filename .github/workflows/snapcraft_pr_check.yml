@@ -30,4 +30,22 @@ jobs:
       - name: Build snap package
         run: |
           # Use destructive mode on GitHub-hosted runners.
-          snapcraft pack --destructive-mode
+          sudo snapcraft pack --destructive-mode
+
+      - name: Print snapcraft execution log on failure
+        if: failure()
+        run: |
+          set -euo pipefail
+
+          log_dir="$HOME/.local/state/snapcraft/log"
+          latest_log="$(ls -1t "${log_dir}"/snapcraft-*.log 2>/dev/null | head -n1 || true)"
+
+          if [[ -z "${latest_log}" ]]; then
+            echo "No snapcraft execution log file found in ${log_dir}"
+            exit 0
+          fi
+
+          cp "${latest_log}" snapcraft-execution.log
+          echo "::group::Snapcraft execution log"
+          cat snapcraft-execution.log
+          echo "::endgroup::"
