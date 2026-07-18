@@ -44,8 +44,43 @@ func Test_junitPrint(t *testing.T) {
 <testsuites>
   <testsuite tests="1" failures="1" time="0" name="">
     <properties></properties>
-    <testcase classname="test.tf" name="test_rule" time="0">
+    <testcase classname="test.tf" name="test_rule test.tf:1,1-4" time="0">
       <failure message="test.tf:1,1-4: issue message" type="Error">Error: issue message&#xA;Rule: test_rule&#xA;Range: test.tf:1,1-4</failure>
+    </testcase>
+  </testsuite>
+</testsuites>`,
+		},
+		{
+			Name: "issues with same rule names",
+			Issues: tflint.Issues{
+				{
+					Rule:    &testRule{},
+					Message: "first",
+					Range: hcl.Range{
+						Filename: "test.tf",
+						Start:    hcl.Pos{Line: 1, Column: 1, Byte: 0},
+						End:      hcl.Pos{Line: 1, Column: 4, Byte: 3},
+					},
+				},
+				{
+					Rule:    &testRule{},
+					Message: "second",
+					Range: hcl.Range{
+						Filename: "test.tf",
+						Start:    hcl.Pos{Line: 2, Column: 1, Byte: 15},
+						End:      hcl.Pos{Line: 2, Column: 5, Byte: 18},
+					},
+				},
+			},
+			Stdout: `<?xml version="1.0" encoding="UTF-8"?>
+<testsuites>
+  <testsuite tests="2" failures="2" time="0" name="">
+    <properties></properties>
+    <testcase classname="test.tf" name="test_rule test.tf:1,1-4" time="0">
+      <failure message="test.tf:1,1-4: first" type="Error">Error: first&#xA;Rule: test_rule&#xA;Range: test.tf:1,1-4</failure>
+    </testcase>
+    <testcase classname="test.tf" name="test_rule test.tf:2,1-5" time="0">
+      <failure message="test.tf:2,1-5: second" type="Error">Error: second&#xA;Rule: test_rule&#xA;Range: test.tf:2,1-5</failure>
     </testcase>
   </testsuite>
 </testsuites>`,
@@ -82,11 +117,31 @@ func Test_junitPrint(t *testing.T) {
 <testsuites>
   <testsuite tests="2" failures="2" time="0" name="">
     <properties></properties>
-    <testcase classname="test.tf" name="test_rule" time="0">
+    <testcase classname="test.tf" name="test_rule test.tf:1,1-4" time="0">
       <failure message="test.tf:1,1-4: issue message" type="Error">Error: issue message&#xA;Rule: test_rule&#xA;Range: test.tf:1,1-4</failure>
     </testcase>
     <testcase classname="(application)" name="application_error" time="0">
       <failure message="Failed to check ruleset" type="error">Error: Failed to check ruleset</failure>
+    </testcase>
+  </testsuite>
+</testsuites>`,
+		},
+		{
+			Name: "diagnostics without subject",
+			Error: hcl.Diagnostics{
+				&hcl.Diagnostic{
+					Severity: hcl.DiagError,
+					Summary:  "summary",
+					Detail:   "detail",
+					Subject:  nil,
+				},
+			},
+			Stdout: `<?xml version="1.0" encoding="UTF-8"?>
+<testsuites>
+  <testsuite tests="1" failures="1" time="0" name="">
+    <properties></properties>
+    <testcase classname="" name="summary" time="0">
+      <failure message=":0,0-0,0: detail" type="error">error: detail&#xA;Summary: summary&#xA;Range: :0,0-0,0</failure>
     </testcase>
   </testsuite>
 </testsuites>`,
@@ -96,9 +151,9 @@ func Test_junitPrint(t *testing.T) {
 	for _, tc := range cases {
 		stdout := &bytes.Buffer{}
 		stderr := &bytes.Buffer{}
-		formatter := &Formatter{Stdout: stdout, Stderr: stderr}
+		formatter := &Formatter{Stdout: stdout, Stderr: stderr, Format: "junit"}
 
-		formatter.junitPrint(tc.Issues, tc.Error, map[string][]byte{})
+		formatter.Print(tc.Issues, tc.Error, map[string][]byte{})
 
 		if stdout.String() != tc.Stdout {
 			t.Fatalf("%s: stdout did not match expected:\n%s", tc.Name, cmp.Diff(tc.Stdout, stdout.String()))

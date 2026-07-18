@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -18,6 +19,7 @@ import (
 	"strings"
 
 	"github.com/google/go-github/v81/github"
+	"github.com/klauspost/compress/snappy"
 	"github.com/terraform-linters/tflint/tflint"
 	"golang.org/x/net/idna"
 	"golang.org/x/oauth2"
@@ -88,8 +90,10 @@ func (c *InstallConfig) CertificateIdentityIssuer() string {
 	return "https://token.actions.githubusercontent.com"
 }
 
-var ErrPluginNotVerified = errors.New("plugin not verified")
-var ErrLegacySigningKeyUsed = errors.New("legacy signing key used")
+var (
+	ErrPluginNotVerified    = errors.New("plugin not verified")
+	ErrLegacySigningKeyUsed = errors.New("legacy signing key used")
+)
 
 // Install fetches the release from GitHub and puts the binary in the plugin directory.
 // This installation process will automatically check the checksum of the downloaded zip file.
@@ -110,7 +114,7 @@ func (c *InstallConfig) Install() (string, error) {
 
 	path := filepath.Join(dir, c.InstallPath()+fileExt())
 	log.Printf("[DEBUG] Mkdir plugin dir: %s", filepath.Dir(path))
-	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return "", fmt.Errorf("Failed to mkdir to %s: %w", filepath.Dir(path), err)
 	}
 
@@ -294,6 +298,21 @@ func (c *InstallConfig) fetchReleaseAssets(ctx context.Context, client *github.C
 	return assets, nil
 }
 
+// attestationsResponse is like github.AttestationsResponse, but also captures
+// the bundle_url field, which go-github does not expose. GitHub may serve the
+// sigstore bundle from blob storage instead of embedding it in the response.
+//
+// See https://github.com/terraform-linters/tflint/issues/2591
+type attestationsResponse struct {
+	Attestations []*attestation `json:"attestations"`
+}
+
+type attestation struct {
+	Bundle       json.RawMessage `json:"bundle"`
+	BundleURL    string          `json:"bundle_url"`
+	RepositoryID int64           `json:"repository_id"`
+}
+
 // fetchArtifactAttestations fetches GitHub Artifact Attestations based on the given artifact.
 func (c *InstallConfig) fetchArtifactAttestations(ctx context.Context, client *github.Client, artifact []byte) ([]*github.Attestation, error) {
 	hash := sha256.New()
@@ -302,11 +321,66 @@ func (c *InstallConfig) fetchArtifactAttestations(ctx context.Context, client *g
 	}
 	digest := hex.EncodeToString(hash.Sum(nil))
 
-	resp, _, err := client.Repositories.ListAttestations(ctx, c.SourceOwner, c.SourceRepo, "sha256:"+digest, nil)
+	// Since go-github does not support the bundle_url field,
+	// send a direct request instead of using client.Repositories.ListAttestations
+	u := fmt.Sprintf("repos/%s/%s/attestations/sha256:%s", c.SourceOwner, c.SourceRepo, digest)
+	req, err := client.NewRequest(http.MethodGet, u, nil)
 	if err != nil {
 		return []*github.Attestation{}, err
 	}
-	return resp.Attestations, nil
+	var resp attestationsResponse
+	if _, err := client.Do(ctx, req, &resp); err != nil {
+		return []*github.Attestation{}, err
+	}
+
+	attestations := make([]*github.Attestation, 0, len(resp.Attestations))
+	for _, a := range resp.Attestations {
+		b := a.Bundle
+		if isNullJSON(b) {
+			if a.BundleURL == "" {
+				return []*github.Attestation{}, fmt.Errorf("attestation has no bundle or bundle URL")
+			}
+			b, err = downloadAttestationBundle(ctx, a.BundleURL)
+			if err != nil {
+				return []*github.Attestation{}, err
+			}
+		}
+		attestations = append(attestations, &github.Attestation{Bundle: b, RepositoryID: a.RepositoryID})
+	}
+	return attestations, nil
+}
+
+// isNullJSON returns whether the raw JSON value is empty or the null literal.
+func isNullJSON(raw json.RawMessage) bool {
+	trimmed := bytes.TrimSpace(raw)
+	return len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null"))
+}
+
+// downloadAttestationBundle downloads a sigstore bundle from the given URL.
+// GitHub serves bundles from blob storage as snappy-compressed JSON.
+func downloadAttestationBundle(ctx context.Context, url string) (json.RawMessage, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("failed to download attestation bundle: %s", resp.Status)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+
+	decoded, err := snappy.Decode(nil, body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to decompress attestation bundle: %s", err)
+	}
+	return decoded, nil
 }
 
 func isIgnorableAttestationError(err error) bool {
@@ -334,6 +408,7 @@ func (c *InstallConfig) downloadToTempFile(ctx context.Context, client *github.C
 	if err != nil {
 		return nil, err
 	}
+	defer downloader.Close()
 
 	file, err := os.CreateTemp("", "tflint-download-temp-file-*")
 	if err != nil {
@@ -342,7 +417,6 @@ func (c *InstallConfig) downloadToTempFile(ctx context.Context, client *github.C
 	if _, err = io.Copy(file, downloader); err != nil {
 		return file, err
 	}
-	downloader.Close()
 	if _, err := file.Seek(0, 0); err != nil {
 		return file, err
 	}
@@ -419,13 +493,14 @@ func extractFileFromZipFile(zipFile *os.File, savePath string) error {
 		if err != nil {
 			return err
 		}
+		defer reader.Close()
 		break
 	}
 	if reader == nil {
 		return fmt.Errorf("file not found. Does the zip contain %s ?", filepath.Base(savePath))
 	}
 
-	file, err := os.OpenFile(savePath, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0755)
+	file, err := os.OpenFile(savePath, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0o755)
 	if err != nil {
 		return err
 	}

@@ -1,4 +1,4 @@
-FROM --platform=$BUILDPLATFORM golang:1.26.3-alpine3.23 AS builder
+FROM --platform=$BUILDPLATFORM golang:1.26.4-alpine3.23 AS builder
 
 ARG TARGETOS TARGETARCH
 
@@ -8,7 +8,7 @@ WORKDIR /tflint
 COPY . /tflint
 RUN GOOS=$TARGETOS GOARCH=$TARGETARCH make build
 
-FROM alpine:3.23.4
+FROM alpine:3.24.1
 
 LABEL maintainer=terraform-linters
 

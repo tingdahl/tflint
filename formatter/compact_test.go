@@ -52,6 +52,18 @@ test.tf:1:1: Error - test (test_rule)
 			Stdout: "main.tf:1:22: error - Unclosed configuration block. There is no closing brace for this block before the end of the file. This may be caused by incorrect brace nesting elsewhere in this file.\n",
 		},
 		{
+			Name: "diagnostics without subject",
+			Error: hcl.Diagnostics{
+				&hcl.Diagnostic{
+					Severity: hcl.DiagError,
+					Summary:  "summary",
+					Detail:   "detail",
+					Subject:  nil,
+				},
+			},
+			Stdout: ":0:0: error - summary. detail\n",
+		},
+		{
 			Name: "joined errors",
 			Error: errors.Join(
 				errors.New("an error occurred"),
@@ -66,9 +78,9 @@ test.tf:1:1: Error - test (test_rule)
 	for _, tc := range cases {
 		stdout := &bytes.Buffer{}
 		stderr := &bytes.Buffer{}
-		formatter := &Formatter{Stdout: stdout, Stderr: stderr}
+		formatter := &Formatter{Stdout: stdout, Stderr: stderr, Format: "compact"}
 
-		formatter.compactPrint(tc.Issues, tc.Error, map[string][]byte{})
+		formatter.Print(tc.Issues, tc.Error, map[string][]byte{})
 
 		if stdout.String() != tc.Stdout {
 			t.Errorf("Failed %s test: expected=%s, stdout=%s", tc.Name, tc.Stdout, stdout.String())

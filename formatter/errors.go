@@ -7,8 +7,18 @@ import (
 )
 
 type errorMapper[T any] struct {
-	diagnostic func(*hcl.Diagnostic) T
-	error      func(error) T
+	diagnostics func(error, hcl.Diagnostics) []T
+	error       func(error) T
+}
+
+// diagRange returns the diagnostic's source range. hcl permits a nil Subject
+// ("some diagnostics have no source ranges at all"), in which case a zero range
+// is returned so formatters can render it without dereferencing nil.
+func diagRange(diag *hcl.Diagnostic) hcl.Range {
+	if diag.Subject == nil {
+		return hcl.Range{}
+	}
+	return *diag.Subject
 }
 
 func mapErrors[T any](err error, mapper errorMapper[T]) []T {
@@ -26,11 +36,7 @@ func mapErrors[T any](err error, mapper errorMapper[T]) []T {
 
 	var diags hcl.Diagnostics
 	if errors.As(err, &diags) {
-		results := make([]T, len(diags))
-		for i, diag := range diags {
-			results[i] = mapper.diagnostic(diag)
-		}
-		return results
+		return mapper.diagnostics(err, diags)
 	}
 
 	return []T{mapper.error(err)}

@@ -21,6 +21,11 @@ type checkstyleError struct {
 
 	// Deprecated: Use `source` instead
 	Rule string `xml:"rule,attr"`
+
+	// filename groups the error under a <file>. It is unexported so it is not
+	// marshaled as an attribute; diagnostics carry their source file here while
+	// Source holds the summary.
+	filename string
 }
 
 type checkstyleFile struct {
@@ -33,7 +38,9 @@ type checkstyle struct {
 	Files   []*checkstyleFile `xml:"file"`
 }
 
-func (f *Formatter) checkstylePrint(issues tflint.Issues, appErr error, sources map[string][]byte) {
+type checkstyleFormat struct{ bufferedFormat }
+
+func (checkstyleFormat) print(f *Formatter, issues tflint.Issues, appErr error, _ map[string][]byte) {
 	files := map[string]*checkstyleFile{}
 	for _, issue := range issues {
 		cherr := &checkstyleError{
@@ -58,7 +65,7 @@ func (f *Formatter) checkstylePrint(issues tflint.Issues, appErr error, sources 
 	}
 
 	for _, cherr := range f.checkstyleErrors(appErr) {
-		filename := cherr.Source
+		filename := cherr.filename
 		if filename == "" {
 			filename = applicationErrorSource
 		}
@@ -101,14 +108,20 @@ func (f *Formatter) checkstylePrint(issues tflint.Issues, appErr error, sources 
 
 func (f *Formatter) checkstyleErrors(err error) []*checkstyleError {
 	return mapErrors(err, errorMapper[*checkstyleError]{
-		diagnostic: func(diag *hcl.Diagnostic) *checkstyleError {
-			return &checkstyleError{
-				Source:   diag.Summary,
-				Line:     diag.Subject.Start.Line,
-				Column:   diag.Subject.Start.Column,
-				Severity: fromHclSeverity(diag.Severity),
-				Message:  diag.Detail,
+		diagnostics: func(_ error, diags hcl.Diagnostics) []*checkstyleError {
+			errors := make([]*checkstyleError, len(diags))
+			for i, diag := range diags {
+				rng := diagRange(diag)
+				errors[i] = &checkstyleError{
+					Source:   diag.Summary,
+					Line:     rng.Start.Line,
+					Column:   rng.Start.Column,
+					Severity: fromHclSeverity(diag.Severity),
+					Message:  diag.Detail,
+					filename: rng.Filename,
+				}
 			}
+			return errors
 		},
 		error: func(err error) *checkstyleError {
 			return &checkstyleError{

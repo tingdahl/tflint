@@ -77,15 +77,55 @@ func Test_checkstylePrint(t *testing.T) {
   </file>
 </checkstyle>`,
 		},
+		{
+			Name:   "diagnostics group under the subject filename",
+			Issues: tflint.Issues{},
+			Error: hcl.Diagnostics{
+				&hcl.Diagnostic{
+					Severity: hcl.DiagError,
+					Summary:  "summary",
+					Detail:   "detail",
+					Subject: &hcl.Range{
+						Filename: "test.tf",
+						Start:    hcl.Pos{Line: 1, Column: 1, Byte: 0},
+						End:      hcl.Pos{Line: 1, Column: 4, Byte: 3},
+					},
+				},
+			},
+			Stdout: `<?xml version="1.0" encoding="UTF-8"?>
+<checkstyle>
+  <file name="test.tf">
+    <error source="summary" line="1" column="1" severity="error" message="detail" link="" rule=""></error>
+  </file>
+</checkstyle>`,
+		},
+		{
+			Name:   "diagnostics without subject group under the application source",
+			Issues: tflint.Issues{},
+			Error: hcl.Diagnostics{
+				&hcl.Diagnostic{
+					Severity: hcl.DiagError,
+					Summary:  "summary",
+					Detail:   "detail",
+					Subject:  nil,
+				},
+			},
+			Stdout: `<?xml version="1.0" encoding="UTF-8"?>
+<checkstyle>
+  <file name="(application)">
+    <error source="summary" line="0" column="0" severity="error" message="detail" link="" rule=""></error>
+  </file>
+</checkstyle>`,
+		},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.Name, func(t *testing.T) {
 			stdout := &bytes.Buffer{}
 			stderr := &bytes.Buffer{}
-			formatter := &Formatter{Stdout: stdout, Stderr: stderr}
+			formatter := &Formatter{Stdout: stdout, Stderr: stderr, Format: "checkstyle"}
 
-			formatter.checkstylePrint(tc.Issues, tc.Error, map[string][]byte{})
+			formatter.Print(tc.Issues, tc.Error, map[string][]byte{})
 
 			if stdout.String() != tc.Stdout {
 				t.Fatalf("expected=%s, stdout=%s", tc.Stdout, stdout.String())

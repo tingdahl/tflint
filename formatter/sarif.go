@@ -1,7 +1,6 @@
 package formatter
 
 import (
-	"errors"
 	"fmt"
 	"path/filepath"
 
@@ -11,7 +10,9 @@ import (
 	"github.com/terraform-linters/tflint/tflint"
 )
 
-func (f *Formatter) sarifPrint(issues tflint.Issues, appErr error) {
+type sarifFormat struct{ bufferedFormat }
+
+func (sarifFormat) print(f *Formatter, issues tflint.Issues, appErr error, _ map[string][]byte) {
 	report, initErr := sarif.New(sarif.Version210)
 	if initErr != nil {
 		panic(initErr)
@@ -79,47 +80,42 @@ func (f *Formatter) sarifPrint(issues tflint.Issues, appErr error) {
 }
 
 func (f *Formatter) sarifAddErrors(errRun *sarif.Run, err error) {
-	if err == nil {
-		return
-	}
+	mapErrors(err, errorMapper[struct{}]{
+		diagnostics: func(_ error, diags hcl.Diagnostics) []struct{} {
+			for _, diag := range diags {
+				rule := errRun.AddRule(diag.Summary).WithDescription("")
 
-	// errors.Join
-	if errs, ok := err.(interface{ Unwrap() []error }); ok {
-		for _, err := range errs.Unwrap() {
-			f.sarifAddErrors(errRun, err)
-		}
-		return
-	}
+				result := errRun.CreateResultForRule(rule.ID).
+					WithLevel(fromHclSeverity(diag.Severity)).
+					WithMessage(sarif.NewTextMessage(diag.Detail))
 
-	// hcl.Diagnostics
-	var diags hcl.Diagnostics
-	if errors.As(err, &diags) {
-		for _, diag := range diags {
-			rule := errRun.AddRule(diag.Summary).WithDescription("")
+				// hcl permits a nil Subject. Emit the result without a location
+				// in that case, mirroring how issues without a source are handled.
+				if diag.Subject != nil {
+					location := sarif.NewPhysicalLocation().
+						WithArtifactLocation(sarif.NewSimpleArtifactLocation(filepath.ToSlash(diag.Subject.Filename))).
+						WithRegion(
+							sarif.NewRegion().
+								WithByteOffset(diag.Subject.Start.Byte).
+								WithByteLength(diag.Subject.End.Byte - diag.Subject.Start.Byte).
+								WithStartLine(diag.Subject.Start.Line).
+								WithStartColumn(diag.Subject.Start.Column).
+								WithEndLine(diag.Subject.End.Line).
+								WithEndColumn(diag.Subject.End.Column),
+						)
 
-			location := sarif.NewPhysicalLocation().
-				WithArtifactLocation(sarif.NewSimpleArtifactLocation(filepath.ToSlash(diag.Subject.Filename))).
-				WithRegion(
-					sarif.NewRegion().
-						WithByteOffset(diag.Subject.Start.Byte).
-						WithByteLength(diag.Subject.End.Byte - diag.Subject.Start.Byte).
-						WithStartLine(diag.Subject.Start.Line).
-						WithStartColumn(diag.Subject.Start.Column).
-						WithEndLine(diag.Subject.End.Line).
-						WithEndColumn(diag.Subject.End.Column),
-				)
+					result.AddLocation(sarif.NewLocationWithPhysicalLocation(location))
+				}
+			}
+			return nil
+		},
+		error: func(err error) struct{} {
+			rule := errRun.AddRule("application_error").WithDescription("")
 
 			errRun.CreateResultForRule(rule.ID).
-				WithLevel(fromHclSeverity(diag.Severity)).
-				WithMessage(sarif.NewTextMessage(diag.Detail)).
-				AddLocation(sarif.NewLocationWithPhysicalLocation(location))
-		}
-		return
-	}
-
-	rule := errRun.AddRule("application_error").WithDescription("")
-
-	errRun.CreateResultForRule(rule.ID).
-		WithLevel("error").
-		WithMessage(sarif.NewTextMessage(err.Error()))
+				WithLevel("error").
+				WithMessage(sarif.NewTextMessage(err.Error()))
+			return struct{}{}
+		},
+	})
 }
