@@ -133,6 +133,50 @@ jobs:
               '- Updates snap/snapcraft.yaml version from template',
             ].join('\n');
 
+            async function ensureAutoMergeEnabled(number) {
+              const prData = await github.graphql(
+                `query($owner: String!, $repo: String!, $number: Int!) {
+                  repository(owner: $owner, name: $repo) {
+                    pullRequest(number: $number) {
+                      id
+                      autoMergeRequest {
+                        enabledAt
+                      }
+                    }
+                  }
+                }`,
+                { owner, repo, number }
+              );
+
+              const pr = prData.repository.pullRequest;
+              if (!pr) {
+                core.setFailed(`Pull request #${number} not found`);
+                return;
+              }
+
+              if (pr.autoMergeRequest) {
+                core.info(`Auto-merge already enabled for PR #${number}`);
+                return;
+              }
+
+              await github.graphql(
+                `mutation($pullRequestId: ID!, $mergeMethod: PullRequestMergeMethod!) {
+                  enablePullRequestAutoMerge(input: {
+                    pullRequestId: $pullRequestId,
+                    mergeMethod: $mergeMethod
+                  }) {
+                    clientMutationId
+                  }
+                }`,
+                {
+                  pullRequestId: pr.id,
+                  mergeMethod: 'MERGE',
+                }
+              );
+
+              core.info(`Enabled auto-merge for PR #${number}`);
+            }
+
             const existing = await github.paginate(github.rest.pulls.list, {
               owner,
               repo,
@@ -144,6 +188,7 @@ jobs:
 
             if (existing.length > 0) {
               core.info(`PR already open: #${existing[0].number}`);
+              await ensureAutoMergeEnabled(existing[0].number);
               return;
             }
 
@@ -157,3 +202,4 @@ jobs:
             });
 
             core.info(`Created PR #${created.data.number}`);
+            await ensureAutoMergeEnabled(created.data.number);
