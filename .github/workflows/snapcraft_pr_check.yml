@@ -32,6 +32,30 @@ jobs:
           # Use destructive mode on GitHub-hosted runners.
           sudo snapcraft pack --destructive-mode
 
+      - name: Install built snap
+        run: |
+          set -euo pipefail
+
+          snap_file="$(ls -1 ./*.snap | head -n1)"
+          sudo snap install --dangerous "${snap_file}"
+
+      - name: Run recursive smoke checks against existing test-data
+        run: |
+          set -euo pipefail
+
+          # Use a neutral config so we can execute against upstream recursive
+          # test-data without depending on internal integration plugins.
+          ci_config_path="$PWD/.tflint-ci.hcl"
+          cat > "${ci_config_path}" <<'EOF'
+          plugin "terraform" {
+            enabled = true
+          }
+          EOF
+
+          tflint --chdir integrationtest/recursive/basic --recursive --config "${ci_config_path}" --format json --force
+          tflint --chdir integrationtest/recursive/filter --recursive --config "${ci_config_path}" --format json --force
+          tflint --chdir integrationtest/recursive/chdir --recursive --config "${ci_config_path}" --format json --force
+
       - name: Print snapcraft execution log on failure
         if: failure()
         run: |
