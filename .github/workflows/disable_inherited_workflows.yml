@@ -17,6 +17,7 @@ jobs:
           script: |
             const keep = new Set([
               '.github/workflows/sync_upstream_release.yml',
+              '.github/workflows/snapcraft_pr_check.yml',
               '.github/workflows/disable_inherited_workflows.yml',
             ]);
 

@@ -1,0 +1,33 @@
+name: Snapcraft PR check
+
+on:
+  pull_request:
+    branches:
+      - master
+    types:
+      - opened
+      - reopened
+      - synchronize
+      - ready_for_review
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  snapcraft-pack:
+    # Always run when manually dispatched, and only for sync branches on PR events.
+    if: github.event_name == 'workflow_dispatch' || startsWith(github.head_ref, 'sync-upstream-')
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Install snapcraft
+        run: |
+          sudo snap install snapcraft --classic
+
+      - name: Build snap package
+        run: |
+          # Use destructive mode on GitHub-hosted runners.
+          snapcraft pack --destructive-mode
