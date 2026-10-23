@@ -17,6 +17,8 @@ permissions:
 jobs:
   merge-upstream-release:
     runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v5
@@ -31,7 +33,7 @@ jobs:
       - name: Add upstream remote
         run: |
           if ! git remote get-url upstream >/dev/null 2>&1; then
-            git remote add upstream https://github.com/terraform-linters/tflint.git
+            git remote add upstream "https://x-access-token:${GH_TOKEN}@github.com/terraform-linters/tflint.git"
           fi
 
       - name: Resolve tag
@@ -44,7 +46,7 @@ jobs:
           if [[ -n "${INPUT_TAG}" ]]; then
             tag="${INPUT_TAG}"
           else
-            tag="$(curl -sSfL https://api.github.com/repos/terraform-linters/tflint/releases/latest | jq -r '.tag_name')"
+            tag="$(gh release view -R terraform-linters/tflint --json tagName -q .tagName)"
           fi
 
           if [[ -z "${tag}" || "${tag}" == "null" ]]; then
@@ -57,7 +59,7 @@ jobs:
             exit 1
           fi
 
-          if ! git ls-remote --exit-code --tags upstream "refs/tags/${tag}" >/dev/null 2>&1; then
+          if ! gh api "repos/terraform-linters/tflint/git/ref/tags/${tag}" >/dev/null 2>&1; then
             echo "Tag ${tag} was not found on upstream"
             exit 1
           fi
