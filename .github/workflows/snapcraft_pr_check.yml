@@ -15,10 +15,12 @@ permissions:
   contents: read
 
 jobs:
-  snapcraft-pack:
-    # Always run when manually dispatched, and only for sync branches on PR events.
-    if: github.event_name == 'workflow_dispatch' || startsWith(github.head_ref, 'sync-upstream-')
+  snapcraft-pack-arch:
     runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [amd64, arm64, armhf, ppc64el, s390x, riscv64]
     steps:
       - name: Checkout repository
         uses: actions/checkout@v5
@@ -28,18 +30,112 @@ jobs:
           sudo snap install snapcraft --classic
 
       - name: Build snap package
-        run: |
-          # Use destructive mode on GitHub-hosted runners.
-          sudo snapcraft pack --destructive-mode
-
-      - name: Install built snap
+        id: pack
+        env:
+          ARCH: ${{ matrix.arch }}
         run: |
           set -euo pipefail
+          image_info="$(python3 - <<'PY'
+          import datetime
+          import json
+          import os
 
-          snap_file="$(ls -1 ./*.snap | head -n1)"
-          sudo snap install --dangerous "${snap_file}"
+          print(json.dumps({
+              "build-request-id": f"gh-{os.environ['GITHUB_RUN_NUMBER']}",
+              "build-request-timestamp": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+              "build_url": f"{os.environ['GITHUB_SERVER_URL']}/{os.environ['GITHUB_REPOSITORY']}/actions/runs/{os.environ['GITHUB_RUN_ID']}",
+          }, separators=(",", ":")))
+          PY
+          )"
+          # Use destructive mode on GitHub-hosted runners.
+          sudo SNAPCRAFT_BUILD_INFO=1 SNAPCRAFT_IMAGE_INFO="${image_info}" \
+            snapcraft pack --destructive-mode --build-for="${ARCH}"
+
+          shopt -s nullglob
+          snaps=(./*_"${ARCH}".snap)
+          if (( ${#snaps[@]} != 1 )); then
+            echo "Expected exactly 1 snap matching ./*_${ARCH}.snap, found ${#snaps[@]}" >&2
+            ls -la ./*.snap 2>/dev/null || true
+            exit 1
+          fi
+
+          snap_file="${snaps[0]}"
+          sudo chmod a+r "${snap_file}"
+          echo "Built snap: ${snap_file}"
+          echo "snap_file=${snap_file}" >> "${GITHUB_OUTPUT}"
+
+      - name: Verify embedded build manifest
+        env:
+          SNAP_FILE: ${{ steps.pack.outputs.snap_file }}
+        run: |
+          set -euo pipefail
+          tmpdir="$(mktemp -d)"
+          trap 'rm -rf "${tmpdir}"' EXIT
+
+          unsquashfs -q -d "${tmpdir}/squashfs" "${SNAP_FILE}" snap/manifest.yaml
+          manifest="${tmpdir}/squashfs/snap/manifest.yaml"
+          if [[ ! -f "${manifest}" ]]; then
+            echo "Error: expected embedded manifest at snap/manifest.yaml in ${SNAP_FILE}" >&2
+            exit 1
+          fi
+
+          python3 - "${manifest}" <<'PY'
+          import os
+          import re
+          import sys
+
+          manifest_path = sys.argv[1]
+          image_info = {}
+          in_image_info = False
+
+          with open(manifest_path, "r", encoding="utf-8") as f:
+              for raw_line in f:
+                  line = raw_line.rstrip("\r\n")
+                  if not line.strip() or line.lstrip().startswith("#"):
+                      continue
+                  if not line.startswith(" "):
+                      in_image_info = (line.strip() == "image-info:")
+                      continue
+                  if in_image_info:
+                      m = re.match(r"^\s+([A-Za-z0-9_-]+):\s*(.+?)\s*$", line)
+                      if m:
+                          image_info[m.group(1)] = m.group(2).strip("'\"")
+
+          print("Embedded image-info:", image_info)
+          if not image_info:
+              print("Error: image-info missing from snap/manifest.yaml", file=sys.stderr)
+              sys.exit(1)
+
+          expected_id = f"gh-{os.environ['GITHUB_RUN_NUMBER']}"
+          expected_url = (
+              f"{os.environ['GITHUB_SERVER_URL']}/"
+              f"{os.environ['GITHUB_REPOSITORY']}/actions/runs/{os.environ['GITHUB_RUN_ID']}"
+          )
+          if image_info.get("build-request-id") != expected_id:
+              print(
+                  f"Error: build-request-id={image_info.get('build-request-id')!r}, expected {expected_id!r}",
+                  file=sys.stderr,
+              )
+              sys.exit(1)
+          if not image_info.get("build-request-timestamp"):
+              print("Error: build-request-timestamp missing from image-info", file=sys.stderr)
+              sys.exit(1)
+          if image_info.get("build_url") != expected_url:
+              print(
+                  f"Error: build_url={image_info.get('build_url')!r}, expected {expected_url!r}",
+                  file=sys.stderr,
+              )
+              sys.exit(1)
+          PY
+
+      - name: Install built snap
+        if: matrix.arch == 'amd64'
+        run: |
+          set -euo pipefail
+          sudo snap install --dangerous "${{ steps.pack.outputs.snap_file }}"
 
       - name: Run recursive smoke checks against existing test-data
+        if: matrix.arch == 'amd64'
         run: |
           set -euo pipefail
 
@@ -89,15 +185,25 @@ jobs:
         run: |
           set -euo pipefail
 
-          log_dir="$HOME/.local/state/snapcraft/log"
-          latest_log="$(ls -1t "${log_dir}"/snapcraft-*.log 2>/dev/null | head -n1 || true)"
+          for log_dir in "$HOME/.local/state/snapcraft/log" "/root/.local/state/snapcraft/log"; do
+            latest_log="$(sudo ls -1t "${log_dir}"/snapcraft-*.log 2>/dev/null | head -n1 || true)"
+            if [[ -n "${latest_log}" ]]; then
+              echo "::group::Snapcraft execution log (${latest_log})"
+              sudo cat "${latest_log}"
+              echo "::endgroup::"
+            fi
+          done
 
-          if [[ -z "${latest_log}" ]]; then
-            echo "No snapcraft execution log file found in ${log_dir}"
-            exit 0
+  snapcraft-pack:
+    needs: [snapcraft-pack-arch]
+    if: always()
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Verify all architecture builds passed
+        env:
+          BUILD_RESULT: ${{ needs.snapcraft-pack-arch.result }}
+        run: |
+          if [[ "${BUILD_RESULT}" != "success" ]]; then
+            echo "snapcraft-pack-arch did not succeed (result: ${BUILD_RESULT})" >&2
+            exit 1
           fi
-
-          cp "${latest_log}" snapcraft-execution.log
-          echo "::group::Snapcraft execution log"
-          cat snapcraft-execution.log
-          echo "::endgroup::"

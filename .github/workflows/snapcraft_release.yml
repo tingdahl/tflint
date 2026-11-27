@@ -1,0 +1,319 @@
+name: Snapcraft release
+
+on:
+  push:
+    branches:
+      - master
+  workflow_run:
+    workflows:
+      - "Snapcraft PR check"
+    types:
+      - completed
+  workflow_dispatch:
+    inputs:
+      channel:
+        description: "Snap Store channel to release to (e.g. latest/edge)"
+        required: false
+        default: "latest/edge"
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+  pull-requests: read
+
+concurrency:
+  group: snapcraft-release
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    runs-on: ubuntu-24.04
+    outputs:
+      should_release: ${{ steps.resolve_direct.outputs.should_release || steps.resolve_workflow_run.outputs.should_release }}
+      ref: ${{ steps.resolve_direct.outputs.ref || steps.resolve_workflow_run.outputs.ref }}
+      channel: ${{ steps.resolve_direct.outputs.channel || steps.resolve_workflow_run.outputs.channel }}
+    steps:
+      - name: Resolve release target (push / workflow_dispatch)
+        id: resolve_direct
+        if: github.event_name != 'workflow_run'
+        env:
+          INPUT_CHANNEL: ${{ inputs.channel }}
+        run: |
+          set -euo pipefail
+          channel="${INPUT_CHANNEL:-latest/edge}"
+          echo "should_release=true" >> "${GITHUB_OUTPUT}"
+          echo "ref=${GITHUB_SHA}" >> "${GITHUB_OUTPUT}"
+          echo "channel=${channel}" >> "${GITHUB_OUTPUT}"
+
+      - name: Resolve release target (workflow_run after auto-merge)
+        id: resolve_workflow_run
+        if: github.event_name == 'workflow_run'
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const wf = context.payload.workflow_run;
+            if (!wf || wf.conclusion !== 'success' || wf.event !== 'pull_request') {
+              core.info(`Skipping: conclusion=${wf?.conclusion}, event=${wf?.event}`);
+              core.setOutput('should_release', 'false');
+              return;
+            }
+
+            const { owner, repo } = context.repo;
+            const headBranch = wf.head_branch;
+            const headSha = wf.head_sha;
+
+            let prNumber = null;
+            if (headBranch) {
+              const prs = await github.paginate(github.rest.pulls.list, {
+                owner,
+                repo,
+                head: `${owner}:${headBranch}`,
+                base: 'master',
+                state: 'all',
+                per_page: 100,
+              });
+              const matched = prs.find((p) => p.head?.sha === headSha) || prs[0];
+              if (matched) {
+                prNumber = matched.number;
+              }
+            }
+
+            if (!prNumber && headSha) {
+              const { data: commitPrs } = await github.rest.repos.listPullRequestsAssociatedWithCommit({
+                owner,
+                repo,
+                commit_sha: headSha,
+              });
+              const matched = commitPrs.find((p) => p.base?.ref === 'master');
+              if (matched) {
+                prNumber = matched.number;
+              }
+            }
+
+            if (!prNumber) {
+              core.info(`No matching PR targeting master found for branch=${headBranch}, sha=${headSha}`);
+              core.setOutput('should_release', 'false');
+              return;
+            }
+
+            const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+            const queryPr = async () => {
+              const data = await github.graphql(
+                `query($owner: String!, $repo: String!, $number: Int!) {
+                  repository(owner: $owner, name: $repo) {
+                    pullRequest(number: $number) {
+                      merged
+                      mergeCommit { oid }
+                      autoMergeRequest { enabledAt }
+                    }
+                  }
+                }`,
+                { owner, repo, number: prNumber }
+              );
+              return data.repository.pullRequest;
+            };
+
+            let pr = await queryPr();
+            if (!pr) {
+              core.info(`PR #${prNumber} not found via GraphQL`);
+              core.setOutput('should_release', 'false');
+              return;
+            }
+
+            if (!pr.merged && !pr.autoMergeRequest) {
+              core.info(`PR #${prNumber} is neither merged nor queued for auto-merge`);
+              core.setOutput('should_release', 'false');
+              return;
+            }
+
+            for (let attempt = 1; attempt <= 12 && !pr.merged; attempt++) {
+              core.info(`Waiting for PR #${prNumber} auto-merge to complete (attempt ${attempt}/12)...`);
+              await sleep(5000);
+              pr = await queryPr();
+              if (!pr) break;
+            }
+
+            if (!pr || !pr.merged || !pr.mergeCommit?.oid) {
+              core.info(`PR #${prNumber} did not complete merge in time`);
+              core.setOutput('should_release', 'false');
+              return;
+            }
+
+            const mergeSha = pr.mergeCommit.oid;
+
+            // Give any push-triggered run a moment to register before checking for duplicates.
+            await sleep(5000);
+            const { data: runsData } = await github.rest.actions.listWorkflowRuns({
+              owner,
+              repo,
+              workflow_id: 'snapcraft_release.yml',
+              head_sha: mergeSha,
+              per_page: 20,
+            });
+
+            const duplicate = (runsData.workflow_runs || []).find(
+              (r) => r.id !== context.runId && (r.event === 'push' || r.conclusion === 'success')
+            );
+            if (duplicate) {
+              core.info(`Release already handled for ${mergeSha} by run ${duplicate.id} (event=${duplicate.event})`);
+              core.setOutput('should_release', 'false');
+              return;
+            }
+
+            core.info(`Releasing merged PR #${prNumber} at ${mergeSha} to latest/edge`);
+            core.setOutput('should_release', 'true');
+            core.setOutput('ref', mergeSha);
+            core.setOutput('channel', 'latest/edge');
+
+  release:
+    needs: [prepare]
+    if: needs.prepare.outputs.should_release == 'true'
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [amd64, arm64, armhf, ppc64el, s390x, riscv64]
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.prepare.outputs.ref }}
+
+      - name: Install snapcraft
+        run: |
+          sudo snap install snapcraft --classic
+
+      - name: Build snap package
+        id: pack
+        env:
+          ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          image_info="$(python3 - <<'PY'
+          import datetime
+          import json
+          import os
+
+          print(json.dumps({
+              "build-request-id": f"gh-{os.environ['GITHUB_RUN_NUMBER']}",
+              "build-request-timestamp": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+              "build_url": f"{os.environ['GITHUB_SERVER_URL']}/{os.environ['GITHUB_REPOSITORY']}/actions/runs/{os.environ['GITHUB_RUN_ID']}",
+          }, separators=(",", ":")))
+          PY
+          )"
+          sudo SNAPCRAFT_BUILD_INFO=1 SNAPCRAFT_IMAGE_INFO="${image_info}" \
+            snapcraft pack --destructive-mode --build-for="${ARCH}"
+
+          shopt -s nullglob
+          snaps=(./*_"${ARCH}".snap)
+          if (( ${#snaps[@]} != 1 )); then
+            echo "Expected exactly 1 snap matching ./*_${ARCH}.snap, found ${#snaps[@]}" >&2
+            ls -la ./*.snap 2>/dev/null || true
+            exit 1
+          fi
+
+          snap_file="${snaps[0]}"
+          sudo chmod a+r "${snap_file}"
+          echo "Built snap: ${snap_file}"
+          echo "snap_file=${snap_file}" >> "${GITHUB_OUTPUT}"
+
+      - name: Verify embedded build manifest
+        env:
+          SNAP_FILE: ${{ steps.pack.outputs.snap_file }}
+        run: |
+          set -euo pipefail
+          tmpdir="$(mktemp -d)"
+          trap 'rm -rf "${tmpdir}"' EXIT
+
+          unsquashfs -q -d "${tmpdir}/squashfs" "${SNAP_FILE}" snap/manifest.yaml
+          manifest="${tmpdir}/squashfs/snap/manifest.yaml"
+          if [[ ! -f "${manifest}" ]]; then
+            echo "Error: expected embedded manifest at snap/manifest.yaml in ${SNAP_FILE}" >&2
+            exit 1
+          fi
+
+          python3 - "${manifest}" <<'PY'
+          import os
+          import re
+          import sys
+
+          manifest_path = sys.argv[1]
+          image_info = {}
+          in_image_info = False
+
+          with open(manifest_path, "r", encoding="utf-8") as f:
+              for raw_line in f:
+                  line = raw_line.rstrip("\r\n")
+                  if not line.strip() or line.lstrip().startswith("#"):
+                      continue
+                  if not line.startswith(" "):
+                      in_image_info = (line.strip() == "image-info:")
+                      continue
+                  if in_image_info:
+                      m = re.match(r"^\s+([A-Za-z0-9_-]+):\s*(.+?)\s*$", line)
+                      if m:
+                          image_info[m.group(1)] = m.group(2).strip("'\"")
+
+          print("Embedded image-info:", image_info)
+          if not image_info:
+              print("Error: image-info missing from snap/manifest.yaml", file=sys.stderr)
+              sys.exit(1)
+
+          expected_id = f"gh-{os.environ['GITHUB_RUN_NUMBER']}"
+          expected_url = (
+              f"{os.environ['GITHUB_SERVER_URL']}/"
+              f"{os.environ['GITHUB_REPOSITORY']}/actions/runs/{os.environ['GITHUB_RUN_ID']}"
+          )
+          if image_info.get("build-request-id") != expected_id:
+              print(
+                  f"Error: build-request-id={image_info.get('build-request-id')!r}, expected {expected_id!r}",
+                  file=sys.stderr,
+              )
+              sys.exit(1)
+          if not image_info.get("build-request-timestamp"):
+              print("Error: build-request-timestamp missing from image-info", file=sys.stderr)
+              sys.exit(1)
+          if image_info.get("build_url") != expected_url:
+              print(
+                  f"Error: build_url={image_info.get('build_url')!r}, expected {expected_url!r}",
+                  file=sys.stderr,
+              )
+              sys.exit(1)
+          PY
+
+      - name: Upload and release snap
+        env:
+          SNAPCRAFT_STORE_CREDENTIALS: ${{ secrets.SNAPCRAFT_STORE_CREDENTIALS }}
+          SNAP_FILE: ${{ steps.pack.outputs.snap_file }}
+          CHANNEL: ${{ needs.prepare.outputs.channel }}
+        run: |
+          set -euo pipefail
+
+          if [[ -z "${SNAPCRAFT_STORE_CREDENTIALS}" ]]; then
+            echo "SNAPCRAFT_STORE_CREDENTIALS secret is not set" >&2
+            exit 1
+          fi
+
+          snapcraft upload --release="${CHANNEL}" "${SNAP_FILE}"
+
+          {
+            echo "#### Published to \`${CHANNEL}\` (\`${{ matrix.arch }}\`)"
+            echo ""
+            echo "Uploaded \`${SNAP_FILE}\` (build \`gh-${GITHUB_RUN_NUMBER}\`)."
+            echo ""
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Print snapcraft execution log on failure
+        if: failure()
+        run: |
+          set -euo pipefail
+
+          for log_dir in "$HOME/.local/state/snapcraft/log" "/root/.local/state/snapcraft/log"; do
+            latest_log="$(sudo ls -1t "${log_dir}"/snapcraft-*.log 2>/dev/null | head -n1 || true)"
+            if [[ -n "${latest_log}" ]]; then
+              echo "::group::Snapcraft execution log (${latest_log})"
+              sudo cat "${latest_log}"
+              echo "::endgroup::"
+            fi
+          done
