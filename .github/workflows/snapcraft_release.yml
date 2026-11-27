@@ -12,9 +12,9 @@ on:
   workflow_dispatch:
     inputs:
       channel:
-        description: "Snap Store channel to release to (e.g. latest/edge)"
+        description: "Snap Store channel to release to (e.g. edge)"
         required: false
-        default: "latest/edge"
+        default: "edge"
         type: string
 
 permissions:
@@ -41,7 +41,7 @@ jobs:
           INPUT_CHANNEL: ${{ inputs.channel }}
         run: |
           set -euo pipefail
-          channel="${INPUT_CHANNEL:-latest/edge}"
+          channel="${INPUT_CHANNEL:-edge}"
           echo "should_release=true" >> "${GITHUB_OUTPUT}"
           echo "ref=${GITHUB_SHA}" >> "${GITHUB_OUTPUT}"
           echo "channel=${channel}" >> "${GITHUB_OUTPUT}"
@@ -161,10 +161,10 @@ jobs:
               return;
             }
 
-            core.info(`Releasing merged PR #${prNumber} at ${mergeSha} to latest/edge`);
+            core.info(`Releasing merged PR #${prNumber} at ${mergeSha} to edge`);
             core.setOutput('should_release', 'true');
             core.setOutput('ref', mergeSha);
-            core.setOutput('channel', 'latest/edge');
+            core.setOutput('channel', 'edge');
 
   release:
     needs: [prepare]
