@@ -16,6 +16,11 @@ on:
         required: false
         default: "edge"
         type: string
+      promote_to_stable:
+        description: "After uploading all architectures to edge, verify arm64 from the Snap Store and promote all architectures to stable"
+        required: false
+        default: true
+        type: boolean
 
 permissions:
   contents: read
@@ -33,7 +38,12 @@ jobs:
       should_release: ${{ steps.resolve_direct.outputs.should_release || steps.resolve_workflow_run.outputs.should_release }}
       ref: ${{ steps.resolve_direct.outputs.ref || steps.resolve_workflow_run.outputs.ref }}
       channel: ${{ steps.resolve_direct.outputs.channel || steps.resolve_workflow_run.outputs.channel }}
+      started_at: ${{ steps.timestamp.outputs.started_at }}
     steps:
+      - name: Record release start timestamp
+        id: timestamp
+        run: |
+          echo "started_at=$(date -u +"%Y-%m-%dT%H:%M:%SZ")" >> "${GITHUB_OUTPUT}"
       - name: Resolve release target (push / workflow_dispatch)
         id: resolve_direct
         if: github.event_name != 'workflow_run'
@@ -302,6 +312,408 @@ jobs:
             echo ""
             echo "Uploaded \`${SNAP_FILE}\` (build \`gh-${GITHUB_RUN_NUMBER}\`)."
             echo ""
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Print snapcraft execution log on failure
+        if: failure()
+        run: |
+          set -euo pipefail
+
+          for log_dir in "$HOME/.local/state/snapcraft/log" "/root/.local/state/snapcraft/log"; do
+            latest_log="$(sudo ls -1t "${log_dir}"/snapcraft-*.log 2>/dev/null | head -n1 || true)"
+            if [[ -n "${latest_log}" ]]; then
+              echo "::group::Snapcraft execution log (${latest_log})"
+              sudo cat "${latest_log}"
+              echo "::endgroup::"
+            fi
+          done
+
+  verify-edge:
+    needs: [prepare, release]
+    if: needs.prepare.outputs.should_release == 'true' && needs.prepare.outputs.channel == 'edge' && needs.release.result == 'success' && (github.event_name != 'workflow_dispatch' || inputs.promote_to_stable != false)
+    runs-on: ubuntu-24.04-arm
+    outputs:
+      snap_name: ${{ steps.wait_store.outputs.snap_name }}
+      target_version: ${{ steps.wait_store.outputs.target_version }}
+      revisions_to_release: ${{ steps.wait_store.outputs.revisions_to_release }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.prepare.outputs.ref }}
+
+      - name: Wait for all architectures to be ready on Snap Store latest/edge
+        id: wait_store
+        env:
+          STARTED_AT: ${{ needs.prepare.outputs.started_at }}
+        run: |
+          set -euo pipefail
+          echo "Waiting 60s for Snap Store channel propagation..."
+          sleep 60
+
+          python3 - <<'PY'
+          import datetime
+          import json
+          import os
+          import re
+          import sys
+          import time
+          import urllib.error
+          import urllib.request
+
+
+          def parse_iso(ts):
+              return datetime.datetime.fromisoformat(ts.replace("Z", "+00:00"))
+
+
+          def parse_snapcraft_yaml(path):
+              snap_name = None
+              target_version = None
+              expected_arches = []
+              in_platforms = False
+
+              with open(path, "r", encoding="utf-8") as f:
+                  for raw_line in f:
+                      line = raw_line.rstrip("\r\n")
+                      stripped = line.strip()
+                      if not stripped or stripped.startswith("#"):
+                          continue
+                      clean = re.sub(r"\s+#.*$", "", line)
+                      indent = len(line) - len(line.lstrip(" "))
+
+                      if indent == 0:
+                          in_platforms = False
+
+                      if in_platforms:
+                          m = re.match(r"^  ([a-zA-Z0-9_-]+):\s*$", clean)
+                          if m:
+                              arch = m.group(1)
+                              if arch not in expected_arches:
+                                  expected_arches.append(arch)
+                          continue
+
+                      if re.match(r"^platforms:\s*$", clean):
+                          in_platforms = True
+                          continue
+
+                      name_m = re.match(r"^name:\s*(.+?)\s*$", clean)
+                      if name_m:
+                          snap_name = name_m.group(1).strip().strip("'\"")
+                          continue
+
+                      ver_m = re.match(r"^version:\s*(.+?)\s*$", clean)
+                      if ver_m:
+                          target_version = ver_m.group(1).strip().strip("'\"")
+                          continue
+
+              if not snap_name or not target_version or not expected_arches:
+                  print(
+                      f"Failed to parse snap metadata (name={snap_name!r}, "
+                      f"version={target_version!r}, arches={expected_arches!r})",
+                      file=sys.stderr,
+                  )
+                  sys.exit(1)
+              if "arm64" not in expected_arches:
+                  print(f"Expected arm64 in platforms ({expected_arches!r})", file=sys.stderr)
+                  sys.exit(1)
+
+              return snap_name, target_version, expected_arches
+
+
+          def fetch_snap_info(snap_name):
+              url = f"https://api.snapcraft.io/v2/snaps/info/{snap_name}"
+              req = urllib.request.Request(
+                  url,
+                  headers={
+                      "Snap-Device-Series": "16",
+                      "Accept": "application/json",
+                      "User-Agent": f"{snap_name}-release-workflow/1.0",
+                  },
+              )
+              for attempt in range(3):
+                  try:
+                      with urllib.request.urlopen(req, timeout=30) as resp:
+                          return json.loads(resp.read().decode("utf-8"))
+                  except urllib.error.HTTPError as err:
+                      if err.code in (429, 500, 502, 503, 504) and attempt < 2:
+                          time.sleep(2 ** attempt)
+                          continue
+                      raise
+
+
+          def write_github_output(values):
+              output_path = os.environ.get("GITHUB_OUTPUT")
+              if not output_path:
+                  return
+              with open(output_path, "a", encoding="utf-8") as f:
+                  for key, val in values.items():
+                      f.write(f"{key}={val}\n")
+
+
+          def append_step_summary(lines):
+              summary_path = os.environ.get("GITHUB_STEP_SUMMARY")
+              if not summary_path:
+                  return
+              with open(summary_path, "a", encoding="utf-8") as f:
+                  f.write("\n".join(lines) + "\n")
+
+
+          def main():
+              started_at_str = os.environ.get("STARTED_AT", "").strip()
+              if not started_at_str:
+                  print("STARTED_AT environment variable is required", file=sys.stderr)
+                  sys.exit(1)
+              cutoff = parse_iso(started_at_str) - datetime.timedelta(seconds=5)
+
+              snap_name, target_version, expected_arches = parse_snapcraft_yaml("snap/snapcraft.yaml")
+              print(f"Checking Snap Store latest/edge for {snap_name} {target_version} (cutoff >= {cutoff.isoformat()})")
+
+              max_polls = 20
+              poll_interval = 15
+              edge_map = {}
+              stable_map = {}
+              not_ready = []
+
+              for poll in range(1, max_polls + 1):
+                  data = fetch_snap_info(snap_name)
+                  edge_map = {}
+                  stable_map = {}
+
+                  for entry in data.get("channel-map", []):
+                      ch = entry.get("channel", {})
+                      if ch.get("track") != "latest":
+                          continue
+                      risk = ch.get("risk")
+                      arch = ch.get("architecture")
+                      if not arch or risk not in ("edge", "stable"):
+                          continue
+                      record = {
+                          "version": str(entry.get("version", "")),
+                          "revision": int(entry["revision"]),
+                          "released_at": ch.get("released-at", ""),
+                      }
+                      if risk == "edge":
+                          edge_map[arch] = record
+                      else:
+                          stable_map[arch] = record
+
+                  not_ready = []
+                  for arch in expected_arches:
+                      edge = edge_map.get(arch)
+                      stable = stable_map.get(arch)
+                      if edge and stable and edge["revision"] < stable["revision"]:
+                          print(
+                              f"Refusing downgrade for {arch}: edge r{edge['revision']} < stable r{stable['revision']}",
+                              file=sys.stderr,
+                          )
+                          sys.exit(1)
+                      if not edge:
+                          not_ready.append(f"{arch}: missing from edge")
+                          continue
+                      if edge["version"] != target_version:
+                          not_ready.append(f"{arch}: version={edge['version']} (want {target_version})")
+                          continue
+                      if not edge["released_at"] or parse_iso(edge["released_at"]) < cutoff:
+                          not_ready.append(f"{arch}: released_at={edge['released_at']} < {cutoff.isoformat()}")
+                          continue
+
+                  if not not_ready:
+                      print(f"All {len(expected_arches)} architectures ready on latest/edge (poll {poll}/{max_polls}).")
+                      break
+
+                  print(f"[poll {poll}/{max_polls}] Waiting for: {', '.join(not_ready)}")
+                  if poll < max_polls:
+                      time.sleep(poll_interval)
+              else:
+                  print(
+                      f"Timed out waiting for all architectures on latest/edge: {', '.join(not_ready)}",
+                      file=sys.stderr,
+                  )
+                  sys.exit(1)
+
+              print(f"{'arch':<10} | {'latest/edge':<20} | {'latest/stable':<20} | released_at")
+              print("-" * 80)
+              summary = [
+                  f"### Snap Store Readiness Check (`{snap_name}` `{target_version}`)",
+                  "",
+                  "| Arch | `latest/edge` | `latest/stable` | `released-at` |",
+                  "| --- | --- | --- | --- |",
+              ]
+              for arch in expected_arches:
+                  edge = edge_map[arch]
+                  stable = stable_map.get(arch)
+                  edge_str = f"{edge['version']} (r{edge['revision']})"
+                  stable_str = f"{stable['version']} (r{stable['revision']})" if stable else "-"
+                  print(f"{arch:<10} | {edge_str:<20} | {stable_str:<20} | {edge['released_at']}")
+                  summary.append(
+                      f"| `{arch}` | `{edge_str}` | `{stable_str}` | `{edge['released_at']}` |"
+                  )
+              summary.append("")
+              append_step_summary(summary)
+
+              write_github_output({
+                  "snap_name": snap_name,
+                  "target_version": target_version,
+                  "arm64_revision": str(edge_map["arm64"]["revision"]),
+                  "revisions_to_release": " ".join(
+                      f"{arch}:{edge_map[arch]['revision']}" for arch in expected_arches
+                  ),
+              })
+
+
+          if __name__ == "__main__":
+              main()
+          PY
+
+      - name: Install snap from Snap Store (latest/edge) on arm64
+        env:
+          SNAP_NAME: ${{ steps.wait_store.outputs.snap_name }}
+          TARGET_VERSION: ${{ steps.wait_store.outputs.target_version }}
+          EXPECTED_ARM64_REVISION: ${{ steps.wait_store.outputs.arm64_revision }}
+        run: |
+          set -euo pipefail
+
+          arch="$(dpkg --print-architecture)"
+          if [[ "${arch}" != "arm64" ]]; then
+            echo "Expected arm64 runner, got ${arch}" >&2
+            exit 1
+          fi
+
+          sudo snap install "${SNAP_NAME}" --channel=latest/edge
+
+          for attempt in $(seq 1 8); do
+            read -r installed_version installed_revision < <(snap list "${SNAP_NAME}" | awk 'NR==2 { print $2, $3 }')
+            echo "Attempt ${attempt}/8: installed ${SNAP_NAME} version=${installed_version} revision=${installed_revision}"
+            if [[ "${installed_version}" == "${TARGET_VERSION}" && "${installed_revision}" == "${EXPECTED_ARM64_REVISION}" ]]; then
+              exit 0
+            fi
+            if (( attempt < 8 )); then
+              sleep 15
+              sudo snap refresh "${SNAP_NAME}" --channel=latest/edge || true
+            fi
+          done
+
+          echo "Error: installed ${SNAP_NAME} (${installed_version} r${installed_revision}) does not match expected ${TARGET_VERSION} r${EXPECTED_ARM64_REVISION}" >&2
+          exit 1
+
+      - name: Run tflint smoke tests on arm64
+        env:
+          TARGET_VERSION: ${{ steps.wait_store.outputs.target_version }}
+        run: |
+          set -euo pipefail
+
+          if ! command -v jq >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y --no-install-recommends jq
+          fi
+
+          version_out="$(tflint --version)"
+          echo "${version_out}"
+          expected_ver="${TARGET_VERSION#v}"
+          if [[ "${version_out}" != *"TFLint version ${expected_ver}"* ]]; then
+            echo "Expected 'TFLint version ${expected_ver}' in tflint --version output" >&2
+            exit 1
+          fi
+
+          ci_config_path="$PWD/.tflint-ci.hcl"
+          cat > "${ci_config_path}" <<'EOF'
+          plugin "terraform" {
+            enabled = true
+          }
+          EOF
+
+          run_and_check() {
+            local label="$1"
+            local dir="$2"
+            local out_file
+            out_file="$(mktemp)"
+
+            echo "Running recursive check: ${label} (${dir})"
+            if ! tflint --chdir "${dir}" --recursive --config "${ci_config_path}" --format json --force >"${out_file}"; then
+              echo "tflint exited non-zero for ${label}"
+              cat "${out_file}"
+              return 1
+            fi
+
+            if ! jq -e . "${out_file}" >/dev/null 2>&1; then
+              echo "tflint output is not valid JSON for ${label}"
+              cat "${out_file}"
+              return 1
+            fi
+
+            if ! jq -e '.errors | length == 0' "${out_file}" >/dev/null 2>&1; then
+              echo "tflint reported runtime errors for ${label}"
+              cat "${out_file}"
+              return 1
+            fi
+
+            echo "Recursive check passed: ${label}"
+          }
+
+          run_and_check "basic" "integrationtest/recursive/basic"
+          run_and_check "filter" "integrationtest/recursive/filter"
+          run_and_check "chdir" "integrationtest/recursive/chdir"
+
+          {
+            echo "#### Snap Store \`latest/edge\` Verification (\`arm64\`)"
+            echo ""
+            echo "Installed \`tflint\` \`${TARGET_VERSION}\` (r\`${{ steps.wait_store.outputs.arm64_revision }}\`) from \`latest/edge\` and passed \`tflint --version\` + recursive smoke checks (\`basic\`, \`filter\`, \`chdir\`)."
+            echo ""
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+  promote-stable:
+    needs: [prepare, release, verify-edge]
+    if: needs.prepare.outputs.should_release == 'true' && needs.prepare.outputs.channel == 'edge' && needs.release.result == 'success' && needs.verify-edge.result == 'success'
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Verify Snap Store promotion credentials
+        env:
+          SNAPCRAFT_STORE_CREDENTIALS: ${{ secrets.SNAPCRAFT_STABLE_CREDENTIALS || secrets.SNAPCRAFT_STORE_CREDENTIALS }}
+        run: |
+          set -euo pipefail
+
+          if [[ -z "${SNAPCRAFT_STORE_CREDENTIALS}" ]]; then
+            echo "Error: neither SNAPCRAFT_STABLE_CREDENTIALS nor SNAPCRAFT_STORE_CREDENTIALS is set." >&2
+            echo "Generate promotion credentials with:" >&2
+            echo "  snapcraft export-login --snaps=tflint --channels=stable --acls=package_access,package_release -" >&2
+            exit 1
+          fi
+
+      - name: Install snapcraft
+        run: |
+          sudo snap install snapcraft --classic
+
+      - name: Promote all verified architectures to stable
+        env:
+          SNAPCRAFT_STORE_CREDENTIALS: ${{ secrets.SNAPCRAFT_STABLE_CREDENTIALS || secrets.SNAPCRAFT_STORE_CREDENTIALS }}
+          SNAP_NAME: ${{ needs.verify-edge.outputs.snap_name }}
+          REVISIONS_TO_RELEASE: ${{ needs.verify-edge.outputs.revisions_to_release }}
+        run: |
+          set -euo pipefail
+
+          for pair in ${REVISIONS_TO_RELEASE}; do
+            arch="${pair%%:*}"
+            rev="${pair##*:}"
+            echo "Promoting ${SNAP_NAME} revision ${rev} (${arch}) to stable..."
+            snapcraft release "${SNAP_NAME}" "${rev}" stable
+          done
+
+      - name: Report final Snap Store status
+        env:
+          SNAPCRAFT_STORE_CREDENTIALS: ${{ secrets.SNAPCRAFT_STABLE_CREDENTIALS || secrets.SNAPCRAFT_STORE_CREDENTIALS }}
+          SNAP_NAME: ${{ needs.verify-edge.outputs.snap_name }}
+        run: |
+          set -euo pipefail
+
+          status_output="$(snapcraft status "${SNAP_NAME}")"
+          echo "${status_output}"
+
+          {
+            echo "#### Final Snap Store Status"
+            echo ""
+            echo '```text'
+            echo "${status_output}"
+            echo '```'
           } >> "${GITHUB_STEP_SUMMARY}"
 
       - name: Print snapcraft execution log on failure
