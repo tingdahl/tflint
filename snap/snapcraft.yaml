@@ -6,20 +6,31 @@ website: https://github.com/tingdahl/tflint
 license: MPL-2.0
 summary: Linter for terraform definitions
 description: >
-      The tflint from https://github.com/terraform-linters/tflint . 
-      The the snap should follow the upstream project.
-adopt-info: tflint
+      The tflint from https://github.com/terraform-linters/tflint .
+      The snap should follow the upstream project.
 source-code: https://github.com/tingdahl/tflint.git
 grade: stable
 base: core24
 
 platforms:
   amd64:
+    build-on: [amd64]
+    build-for: [amd64]
   arm64:
+    build-on: [amd64]
+    build-for: [arm64]
   armhf:
+    build-on: [amd64]
+    build-for: [armhf]
   ppc64el:
+    build-on: [amd64]
+    build-for: [ppc64el]
   s390x:
+    build-on: [amd64]
+    build-for: [s390x]
   riscv64:
+    build-on: [amd64]
+    build-for: [riscv64]
 
 confinement: strict
 
@@ -33,12 +44,27 @@ apps:
 parts:
   tflint:
     plugin: go
+    source: .
     build-environment:
-      - GOBIN: "$CRAFT_PRIME"
+      - CGO_ENABLED: "0"
     build-snaps:
       - go/1.26/stable
-    source-type: git
     override-build: |
-      # build the latest tagged release
-      make install
-    source: https://github.com/tingdahl/tflint.git
+      export GOOS=linux
+      case "$CRAFT_ARCH_BUILD_FOR" in
+        armhf)
+          export GOARCH=arm
+          export GOARM=7
+          ;;
+        ppc64el)
+          export GOARCH=ppc64le
+          ;;
+        amd64|arm64|s390x|riscv64)
+          export GOARCH="$CRAFT_ARCH_BUILD_FOR"
+          ;;
+        *)
+          echo "Unsupported architecture: $CRAFT_ARCH_BUILD_FOR" >&2
+          exit 1
+          ;;
+      esac
+      go build -o "$CRAFT_PART_INSTALL/tflint" .
